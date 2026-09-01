@@ -1,0 +1,24 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net9.0-windows</TargetFramework>
+    <UseWindowsForms>true</UseWindowsForms>
+    <RootNamespace>Yako.Screenshot</RootNamespace>
+    <AssemblyName>Yako.Screenshot</AssemblyName>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <LangVersion>latest</LangVersion>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+    <ApplicationIcon>app.ico</ApplicationIcon>
+    <EnableWindowsTargeting>true</EnableWindowsTargeting>
+    <!-- The overlay draws everything itself; no designer, no resources. -->
+    <EnableDefaultApplicationDefinition>false</EnableDefaultApplicationDefinition>
+    <SatelliteResourceLanguages>en</SatelliteResourceLanguages>
+    <!-- WFO0003 asks us to move DPI awareness out of the manifest and into
+         Application.SetHighDpiMode. We keep the manifest deliberately: it is applied by the
+         loader before any managed code runs, and exact physical-pixel capture depends on it. -->
+    <NoWarn>WFO0003</NoWarn>
+  </PropertyGroup>
+
+</Project>

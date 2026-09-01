@@ -1,0 +1,18 @@
+# Build output
+bin/
+obj/
+publish/
+
+# Publish artifacts are attached to GitHub Releases, never committed:
+# a 46 MB exe would sit in the repo's history forever, once per rebuild.
+*.exe
+*.msi
+
+# IDE
+.idea/
+.vs/
+*.user
+*.suo
+
+# Local
+*.log
