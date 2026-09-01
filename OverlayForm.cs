@@ -21,6 +21,7 @@ internal sealed class OverlayForm : Form
 
     private const int WM_DPICHANGED = 0x02E0;
     private const int MinDragPixels = 4;
+    private const int TooltipDelayMs = 1000;
 
     private static readonly Color Accent = Color.FromArgb(0x4C, 0x9A, 0xFF);
     private static readonly Color ChromeBack = Color.FromArgb(240, 26, 26, 30);
@@ -44,6 +45,12 @@ internal sealed class OverlayForm : Form
     private Point _gripStartMouse;
     private Rectangle _barRect;
     private ButtonId? _hoverButton;
+
+    // Hover highlighting is instant, but the tooltip waits: it is a reminder for when you
+    // pause, not something that should flash past every time the cursor crosses the bar.
+    private readonly System.Windows.Forms.Timer _tooltipTimer;
+    private ButtonId? _tooltipFor;
+
     private bool _saveDialogOpen;
 
     public OverlayForm(CaptureResult capture, Settings settings)
@@ -64,6 +71,15 @@ internal sealed class OverlayForm : Form
 
         // Pure arithmetic, so this works before the handle exists.
         _mouse = new Point(Cursor.Position.X - capture.VirtualBounds.X, Cursor.Position.Y - capture.VirtualBounds.Y);
+
+        _tooltipTimer = new System.Windows.Forms.Timer { Interval = TooltipDelayMs };
+        _tooltipTimer.Tick += (_, _) =>
+        {
+            _tooltipTimer.Stop();
+            if (_hoverButton is null) return;
+            _tooltipFor = _hoverButton;
+            Invalidate();
+        };
     }
 
     protected override void OnShown(EventArgs e)
@@ -378,7 +394,7 @@ internal sealed class OverlayForm : Form
             bool hover = _hoverButton == id;
             Color back = hover ? ButtonHover : ButtonBack;
 
-            if (hover) DrawTooltip(g, scale, rect, spec.Tooltip);
+            if (_tooltipFor == id) DrawTooltip(g, scale, rect, spec.Tooltip);
 
             FillRounded(g, rect, Px(6, scale), back);
 
@@ -502,6 +518,8 @@ internal sealed class OverlayForm : Form
     {
         base.OnMouseDown(e);
         _mouse = e.Location;
+
+        HideTooltip();
 
         if (e.Button == MouseButtons.Right)
         {
@@ -627,12 +645,27 @@ internal sealed class OverlayForm : Form
         if (hover != _hoverButton)
         {
             _hoverButton = hover;
-            Invalidate();   // the hover tooltip is drawn outside the bar
+
+            // Moving to another button restarts the wait rather than carrying the old
+            // tooltip across, so it never describes the wrong button.
+            _tooltipFor = null;
+            _tooltipTimer.Stop();
+            if (hover is not null) _tooltipTimer.Start();
+
+            Invalidate();   // the tooltip is drawn outside the bar
         }
 
         Cursor = hover is not null || _barRect.Contains(p)
             ? Cursors.Hand
             : CursorFor(HitTestGrip(p, scale));
+    }
+
+    private void HideTooltip()
+    {
+        _tooltipTimer.Stop();
+        if (_tooltipFor is null) return;
+        _tooltipFor = null;
+        Invalidate();
     }
 
     private Grip HitTestGrip(Point p, double scale)
@@ -817,6 +850,7 @@ internal sealed class OverlayForm : Form
     {
         if (disposing)
         {
+            _tooltipTimer.Dispose();
             _dimmed?.Dispose();
             _dimmed = null;
             foreach (var f in _fonts.Values) f.Dispose();
