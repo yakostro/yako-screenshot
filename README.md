@@ -14,7 +14,7 @@ Run `Yako.Screenshot.exe`. It sits in the tray and waits.
 
 | Action | |
 |---|---|
-| **Ctrl+PrtScn** | freeze the screen and start selecting (also: tray menu → *Capture now*, or double-click the tray icon) |
+| **Ctrl+PrtScn** | freeze the screen and start selecting (also: left-click the tray icon, or tray menu → *Capture now*) |
 | **drag** | pick an area; the rest of the screen stays dimmed |
 | **handles** | drag any of the 8 handles to adjust; drag inside to move; drag a handle past the opposite edge to flip |
 | **arrows** | nudge by 1 px, **Shift+arrows** by 10 px, **Ctrl+arrows** resize from the bottom-right |
@@ -24,13 +24,27 @@ Run `Yako.Screenshot.exe`. It sits in the tray and waits.
 | **Esc** | cancel the whole operation |
 | **right-click** | drop the current selection and start over |
 
-Hover any button for a reminder of what it does.
+Hover any button for a second and a tooltip explains what it does.
 
 The badge at the edge of the selection shows two numbers: the **captured pixels** (what
 *Copy* and *Save* write out) and, below it, the **logical size** at `@1×` (what *Copy for
 Figma* lands at). At 200% scaling a 700 × 400 drag reads `700 × 400` and `350 × 200 @1×`.
 
 Preferences live in `%APPDATA%\Yako\settings.json`.
+
+## Starting with Windows
+
+The first launch registers the app under `HKCU\...\CurrentVersion\Run`, so it is there
+after every sign-in. No installer, no admin rights, no scheduled task. A tray app that
+exists to answer a hotkey is useless while it is not running, so this is not asked about.
+
+Later launches only *correct* that entry if the exe has moved. If the entry is gone the app
+leaves it gone, on the assumption you removed it on purpose - so both ways of turning it off
+stick:
+
+- **Task Manager → Startup apps** disables it while leaving the app installed.
+- **Tray menu → Remove app** undoes the lot: startup entry, saved settings, and it quits.
+  The exe cannot delete itself while running, so Explorer opens with it selected.
 
 ## Nothing is ever resampled
 

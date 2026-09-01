@@ -6,8 +6,14 @@ internal sealed class Settings
 {
     public string? LastSaveDirectory { get; set; }
 
-    /// <summary>Drives the one-time "it is running, here is the hotkey" balloon.</summary>
+    /// <summary>Drives the one-time "it is running, here is the hotkey" notice.</summary>
     public bool FirstRunDone { get; set; }
+
+    /// <summary>
+    /// Set once the HKCU Run entry has been created. Stops the app re-adding autostart on
+    /// every launch after the user has deliberately removed it.
+    /// </summary>
+    public bool AutostartRegistered { get; set; }
 
     private static string Folder => System.IO.Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "Yako");
@@ -27,6 +33,19 @@ internal sealed class Settings
             // fall through to defaults
         }
         return new Settings();
+    }
+
+    /// <summary>Deletes the stored preferences. Used by Remove app.</summary>
+    public static void DeleteStore()
+    {
+        try
+        {
+            if (Directory.Exists(Folder)) Directory.Delete(Folder, recursive: true);
+        }
+        catch
+        {
+            // A leftover settings file is harmless; never fail the removal over it.
+        }
     }
 
     public void Save()

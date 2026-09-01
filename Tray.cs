@@ -20,6 +20,8 @@ internal sealed class TrayContext : ApplicationContext
             ShortcutKeyDisplayString = "Ctrl+PrtScn",
         });
         menu.Items.Add(new ToolStripSeparator());
+        menu.Items.Add(new ToolStripMenuItem("Remove app", null, (_, _) => RemoveApp()));
+        menu.Items.Add(new ToolStripSeparator());
         menu.Items.Add(new ToolStripMenuItem("Exit", null, (_, _) => ExitApp()));
 
         _icon = new NotifyIcon
@@ -36,6 +38,9 @@ internal sealed class TrayContext : ApplicationContext
         {
             if (e.Button == MouseButtons.Left) BeginCapture();
         };
+
+        // Do this before the first-run notice, so the notice can state it as fact.
+        Autostart.Ensure(_settings);
 
         _hotkey = new HotkeyListener();
         _hotkey.Triggered += BeginCapture;
@@ -62,13 +67,16 @@ internal sealed class TrayContext : ApplicationContext
             _settings.Save();
             AfterStartup(() => MessageBox.Show(
                 """
-                yako-screenshot is running.
+                yako-screenshot is running, and will now start automatically when you
+                sign in to Windows.
 
-                Press Ctrl+PrtScn to capture an area, then Copy or Save.
+                Press Ctrl+PrtScn to capture an area, then Copy or Save. Left-clicking the
+                tray icon does the same.
 
                 It has no window - it lives in the tray, and the icon may be hidden under
                 the ^ arrow next to the clock. To pin it there: Taskbar settings, then
-                Other system tray icons.
+                Other system tray icons. To stop it starting with Windows: Task Manager,
+                then Startup apps.
                 """,
                 "yako-screenshot", MessageBoxButtons.OK, MessageBoxIcon.Information));
         }
@@ -117,6 +125,50 @@ internal sealed class TrayContext : ApplicationContext
         };
 
         overlay.Show();
+    }
+
+    /// <summary>
+    /// Undoes everything first launch set up: startup entry and saved settings. The program
+    /// file cannot delete itself while it is running, so Explorer is opened with it selected
+    /// rather than leaving the user to hunt for it.
+    /// </summary>
+    private void RemoveApp()
+    {
+        string exe = Environment.ProcessPath ?? "the program file";
+
+        var answer = MessageBox.Show(
+            $"""
+            Remove yako-screenshot?
+
+            This will stop it starting with Windows, delete its saved settings,
+            and quit.
+
+            The program file itself stays on disk. Explorer will open with it
+            selected so you can delete it:
+
+            {exe}
+            """,
+            "yako-screenshot",
+            MessageBoxButtons.YesNo,
+            MessageBoxIcon.Warning,
+            MessageBoxDefaultButton.Button2);
+
+        if (answer != DialogResult.Yes) return;
+
+        Autostart.Remove();
+        Settings.DeleteStore();
+
+        try
+        {
+            if (File.Exists(exe))
+                System.Diagnostics.Process.Start("explorer.exe", $"/select,\"{exe}\"");
+        }
+        catch
+        {
+            // Not being able to open Explorer must not block the removal itself.
+        }
+
+        ExitApp();
     }
 
     private void ExitApp()
