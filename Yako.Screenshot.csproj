@@ -6,6 +6,8 @@
     <UseWindowsForms>true</UseWindowsForms>
     <RootNamespace>Yako.Screenshot</RootNamespace>
     <AssemblyName>Yako.Screenshot</AssemblyName>
+    <!-- Bump before cutting a release; scripts/build-release.ps1 and publish-release.ps1 read this. -->
+    <Version>0.1.2</Version>
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
     <LangVersion>latest</LangVersion>

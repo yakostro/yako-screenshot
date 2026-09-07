@@ -1,4 +1,5 @@
 using System.Drawing.Drawing2D;
+using System.Drawing.Imaging;
 using System.Drawing.Text;
 
 namespace Yako.Screenshot;
@@ -29,13 +30,20 @@ internal sealed class OverlayForm : Form
     private static readonly Color ChromeHint = Color.FromArgb(160, 162, 172);
     private static readonly Color ButtonBack = Color.FromArgb(255, 50, 50, 58);
     private static readonly Color ButtonHover = Color.FromArgb(255, 72, 72, 84);
+    private static readonly Color Veil = Color.FromArgb(120, 0, 0, 0);
 
     private readonly CaptureResult _capture;
     private readonly Settings _settings;
     private readonly Dictionary<int, Font> _fonts = new();
     private readonly List<(Rectangle Rect, ButtonId Id)> _buttons = new();
 
-    private Bitmap? _dimmed;
+    private readonly SolidBrush _veilBrush = new(Veil);
+
+    private Bitmap? _paintSource;
+
+    /// <summary>What the last paint drew on top of the veil - the other half of the dirty rect.</summary>
+    private Rectangle _paintedChrome;
+
     private Phase _phase = Phase.Idle;
     private Rectangle _sel;          // client coordinates
     private Point _mouse;
@@ -78,7 +86,7 @@ internal sealed class OverlayForm : Form
             _tooltipTimer.Stop();
             if (_hoverButton is null) return;
             _tooltipFor = _hoverButton;
-            Invalidate();
+            InvalidateChrome();
         };
     }
 
@@ -139,17 +147,20 @@ internal sealed class OverlayForm : Form
 
     // ---------------- painting ----------------
 
-    private Bitmap Dimmed => _dimmed ??= BuildDimmed();
+    /// <summary>
+    /// The frozen desktop in GDI+'s own blitting format. Copying out of 32bppPArgb is an order
+    /// of magnitude faster than out of the capture's 32bppRgb, which GDI+ re-converts on every
+    /// single blit - and this window repaints on every mouse move.
+    /// </summary>
+    private Bitmap PaintSource => _paintSource ??= BuildPaintSource();
 
-    private Bitmap BuildDimmed()
+    private Bitmap BuildPaintSource()
     {
-        // Baking the veil once keeps every repaint down to two straight blits, which matters
-        // while dragging across a large multi-monitor desktop.
-        var b = new Bitmap(_capture.Image.Width, _capture.Image.Height, _capture.Image.PixelFormat);
+        var b = new Bitmap(_capture.Image.Width, _capture.Image.Height, PixelFormat.Format32bppPArgb);
         using var g = Graphics.FromImage(b);
+        // The capture carries no alpha channel, so this lands fully opaque - which is what the
+        // veil blend in OnPaint expects underneath it.
         g.DrawImageUnscaled(_capture.Image, 0, 0);
-        using var veil = new SolidBrush(Color.FromArgb(120, 0, 0, 0));
-        g.FillRectangle(veil, 0, 0, b.Width, b.Height);
         return b;
     }
 
@@ -160,25 +171,38 @@ internal sealed class OverlayForm : Form
 
     protected override void OnPaint(PaintEventArgs e)
     {
+        // Every step below is confined to the invalidated rect. This window is the whole
+        // virtual desktop, so redrawing all of it once per mouse move cost tens of
+        // milliseconds a frame and dragging visibly stuttered.
+        var clip = Rectangle.Intersect(e.ClipRectangle, ClientRectangle);
+        if (clip.Width <= 0 || clip.Height <= 0) return;
+
         var g = e.Graphics;
         g.InterpolationMode = InterpolationMode.NearestNeighbor;
         g.PixelOffsetMode = PixelOffsetMode.Half;
         g.TextRenderingHint = TextRenderingHint.ClearTypeGridFit;
 
-        g.DrawImageUnscaled(Dimmed, 0, 0);
-
         bool hasSelection = _phase != Phase.Idle && _sel.Width > 0 && _sel.Height > 0;
+
+        // The capture blitted 1:1 - so the selection shows exact pixels - then the veil over
+        // everything outside the selection. Same result as dimming the whole desktop up front,
+        // but the work is proportional to the dirty rect instead of the desktop.
+        g.DrawImage(PaintSource, clip, clip, GraphicsUnit.Pixel);
+
+        var state = g.Save();
         if (hasSelection)
         {
-            // The selection shows the untouched capture: clip, then blit 1:1 for exact pixels.
-            g.SetClip(_sel);
-            g.DrawImageUnscaled(_capture.Image, 0, 0);
-            g.ResetClip();
+            using var outside = new Region(clip);
+            outside.Exclude(_sel);
+            g.IntersectClip(outside);
         }
+        g.FillRectangle(_veilBrush, clip);
+        g.Restore(state);
 
         if (_phase == Phase.Idle)
         {
             DrawCursorLabel(g);
+            _paintedChrome = ChromeBounds();
             return;
         }
 
@@ -194,9 +218,16 @@ internal sealed class OverlayForm : Form
             EnsureToolbarLayout(scale);
             DrawToolbar(g, scale);
         }
+
+        _paintedChrome = ChromeBounds();
     }
 
-    private void DrawCursorLabel(Graphics g)
+    private readonly record struct LabelLayout(
+        Rectangle Rect, double Scale, Font Font, string Text, Size TextSize, int PadX, int PadY);
+
+    // Each piece of chrome has its geometry in a layout method and its ink in a Draw method,
+    // so ChromeBounds can measure exactly what a repaint will touch without drawing it.
+    private LabelLayout CursorLabelLayout()
     {
         double scale = ScaleAt(_mouse);
         var font = FontPx(13 * scale);
@@ -214,14 +245,23 @@ internal sealed class OverlayForm : Form
         pos.X = Math.Max(host.Left, pos.X);
         pos.Y = Math.Max(host.Top, pos.Y);
 
-        var rect = new Rectangle(pos, size);
+        return new LabelLayout(new Rectangle(pos, size), scale, font, text, textSize, padX, padY);
+    }
+
+    private void DrawCursorLabel(Graphics g)
+    {
+        var (rect, scale, font, text, textSize, padX, padY) = CursorLabelLayout();
         FillRounded(g, rect, Px(6, scale), ChromeBack);
         TextRenderer.DrawText(g, text, font,
             new Rectangle(rect.X + padX, rect.Y + padY, textSize.Width, textSize.Height),
             ChromeText, TextFormatFlags.NoPadding);
     }
 
-    private void DrawSizeBadge(Graphics g, double scale)
+    private readonly record struct BadgeLayout(
+        Rectangle Rect, string Main, Font MainFont, Size MainSize,
+        string? Hint, Font HintFont, Size HintSize, int PadX, int PadY, int LineGap);
+
+    private BadgeLayout SizeBadgeLayout(double scale)
     {
         // Primary number is what Copy and Save write out: every captured pixel.
         string main = _sel.Width + " × " + _sel.Height;
@@ -254,16 +294,25 @@ internal sealed class OverlayForm : Form
         if (y < ClientRectangle.Top) y = _sel.Y + gap;   // no room above: hang inside
         x = Math.Clamp(x, ClientRectangle.Left, Math.Max(ClientRectangle.Left, ClientRectangle.Right - size.Width));
 
-        var rect = new Rectangle(x, y, size.Width, size.Height);
-        FillRounded(g, rect, Px(5, scale), ChromeBack);
-        TextRenderer.DrawText(g, main, mainFont,
-            new Rectangle(rect.X + padX, rect.Y + padY, mainSize.Width, mainSize.Height),
+        return new BadgeLayout(new Rectangle(x, y, size.Width, size.Height),
+            main, mainFont, mainSize, hint, hintFont, hintSize, padX, padY, lineGap);
+    }
+
+    private void DrawSizeBadge(Graphics g, double scale)
+    {
+        var l = SizeBadgeLayout(scale);
+        var flags = TextFormatFlags.NoPadding;
+
+        FillRounded(g, l.Rect, Px(5, scale), ChromeBack);
+        TextRenderer.DrawText(g, l.Main, l.MainFont,
+            new Rectangle(l.Rect.X + l.PadX, l.Rect.Y + l.PadY, l.MainSize.Width, l.MainSize.Height),
             ChromeText, flags);
 
-        if (hint is not null)
+        if (l.Hint is not null)
         {
-            TextRenderer.DrawText(g, hint, hintFont,
-                new Rectangle(rect.X + padX, rect.Y + padY + mainSize.Height + lineGap, hintSize.Width, hintSize.Height),
+            TextRenderer.DrawText(g, l.Hint, l.HintFont,
+                new Rectangle(l.Rect.X + l.PadX, l.Rect.Y + l.PadY + l.MainSize.Height + l.LineGap,
+                    l.HintSize.Width, l.HintSize.Height),
                 ChromeHint, flags);
         }
     }
@@ -429,11 +478,12 @@ internal sealed class OverlayForm : Form
         }
     }
 
-    /// <summary>Hover label, centred above the button it describes. First line is the title.</summary>
-    private void DrawTooltip(Graphics g, double scale, Rectangle button, string[] lines)
-    {
-        if (lines.Length == 0) return;
+    private readonly record struct TooltipLayout(
+        Rectangle Rect, Font TitleFont, Font BodyFont, Size[] Sizes, int PadX, int PadY, int LineGap);
 
+    /// <summary>Hover label, centred above the button it describes. First line is the title.</summary>
+    private TooltipLayout MeasureTooltip(double scale, Rectangle button, string[] lines)
+    {
         var titleFont = FontPx(12 * scale);
         var bodyFont = FontPx(11 * scale);
         var flags = TextFormatFlags.NoPadding;
@@ -456,16 +506,24 @@ internal sealed class OverlayForm : Form
         if (y < ClientRectangle.Top) y = button.Bottom + Px(8, scale);
         x = Math.Clamp(x, ClientRectangle.Left, Math.Max(ClientRectangle.Left, ClientRectangle.Right - size.Width));
 
-        var rect = new Rectangle(x, y, size.Width, size.Height);
-        FillRounded(g, rect, Px(6, scale), ChromeBack);
+        return new TooltipLayout(new Rectangle(x, y, size.Width, size.Height),
+            titleFont, bodyFont, sizes, padX, padY, lineGap);
+    }
 
-        int ty = rect.Y + padY;
+    private void DrawTooltip(Graphics g, double scale, Rectangle button, string[] lines)
+    {
+        if (lines.Length == 0) return;
+
+        var l = MeasureTooltip(scale, button, lines);
+        FillRounded(g, l.Rect, Px(6, scale), ChromeBack);
+
+        int ty = l.Rect.Y + l.PadY;
         for (int i = 0; i < lines.Length; i++)
         {
-            TextRenderer.DrawText(g, lines[i], i == 0 ? titleFont : bodyFont,
-                new Rectangle(rect.X + padX, ty, sizes[i].Width, sizes[i].Height),
-                i == 0 ? ChromeText : ChromeHint, flags);
-            ty += sizes[i].Height + lineGap;
+            TextRenderer.DrawText(g, lines[i], i == 0 ? l.TitleFont : l.BodyFont,
+                new Rectangle(l.Rect.X + l.PadX, ty, l.Sizes[i].Width, l.Sizes[i].Height),
+                i == 0 ? ChromeText : ChromeHint, TextFormatFlags.NoPadding);
+            ty += l.Sizes[i].Height + l.LineGap;
         }
     }
 
@@ -512,6 +570,66 @@ internal sealed class OverlayForm : Form
         return ClientRectangle;
     }
 
+    // ---------------- dirty rects ----------------
+
+    /// <summary>
+    /// Bounding box of everything <see cref="OnPaint"/> draws on top of the veil in the current
+    /// state - selection, badge, grips, toolbar, tooltip, or the idle cursor label.
+    /// </summary>
+    private Rectangle ChromeBounds()
+    {
+        if (_phase == Phase.Idle) return CursorLabelLayout().Rect;
+
+        double scale = SelectionScale();
+
+        // The selection itself counts: its interior is the undimmed capture, so it repaints
+        // whenever it moves or resizes.
+        var bounds = Rectangle.Union(_sel, SizeBadgeLayout(scale).Rect);
+
+        if (_phase == Phase.Adjusting)
+        {
+            foreach (var (_, rect) in GripRects(scale))
+                bounds = Rectangle.Union(bounds, rect);
+
+            EnsureToolbarLayout(scale);
+            bounds = Rectangle.Union(bounds, _barRect);
+
+            if (_tooltipFor is not null)
+            {
+                foreach (var (rect, id) in _buttons)
+                {
+                    if (id != _tooltipFor) continue;
+                    var spec = Array.Find(Buttons, b => b.Id == id);
+                    bounds = Rectangle.Union(bounds, MeasureTooltip(scale, rect, spec.Tooltip).Rect);
+                }
+            }
+        }
+
+        return bounds;
+    }
+
+    /// <summary>
+    /// Repaints what the state change just invalidated: what is on screen now plus what the new
+    /// state will draw. Windows accumulates these, so several changes before one paint are safe.
+    /// </summary>
+    private void InvalidateChrome()
+    {
+        var dirty = DirtyRect();
+        if (dirty.Width > 0 && dirty.Height > 0) Invalidate(dirty);
+    }
+
+    private Rectangle DirtyRect()
+    {
+        var now = ChromeBounds();
+        var dirty = _paintedChrome.Width > 0 && _paintedChrome.Height > 0
+            ? Rectangle.Union(_paintedChrome, now)
+            : now;
+
+        // A couple of pixels of slack for pen widths and rounded corners at the edges.
+        dirty.Inflate(2, 2);
+        return Rectangle.Intersect(dirty, ClientRectangle);
+    }
+
     // ---------------- mouse ----------------
 
     protected override void OnMouseDown(MouseEventArgs e)
@@ -529,7 +647,7 @@ internal sealed class OverlayForm : Form
             _activeGrip = Grip.None;
             _hoverButton = null;
             Cursor = Cursors.Cross;
-            Invalidate();
+            InvalidateChrome();
             return;
         }
 
@@ -566,7 +684,7 @@ internal sealed class OverlayForm : Form
         _activeGrip = Grip.None;
         _hoverButton = null;
         Cursor = Cursors.Cross;
-        Invalidate();
+        InvalidateChrome();
     }
 
     protected override void OnMouseMove(MouseEventArgs e)
@@ -577,18 +695,18 @@ internal sealed class OverlayForm : Form
         switch (_phase)
         {
             case Phase.Idle:
-                Invalidate();
+                InvalidateChrome();
                 break;
 
             case Phase.Dragging:
                 _sel = NormalizeCorners(_dragStart, e.Location);
                 ClampSelection();
-                Invalidate();
+                InvalidateChrome();
                 break;
 
             case Phase.Adjusting when _activeGrip != Grip.None:
                 ApplyGrip(e.Location);
-                Invalidate();
+                InvalidateChrome();
                 break;
 
             case Phase.Adjusting:
@@ -606,7 +724,7 @@ internal sealed class OverlayForm : Form
         {
             _activeGrip = Grip.None;
             UpdateHover(e.Location);
-            Invalidate();
+            InvalidateChrome();
             return;
         }
 
@@ -624,7 +742,7 @@ internal sealed class OverlayForm : Form
             _phase = Phase.Adjusting;
             UpdateHover(e.Location);
         }
-        Invalidate();
+        InvalidateChrome();
     }
 
     private void UpdateHover(Point p)
@@ -652,7 +770,7 @@ internal sealed class OverlayForm : Form
             _tooltipTimer.Stop();
             if (hover is not null) _tooltipTimer.Start();
 
-            Invalidate();   // the tooltip is drawn outside the bar
+            InvalidateChrome();   // the tooltip is drawn outside the bar
         }
 
         Cursor = hover is not null || _barRect.Contains(p)
@@ -665,7 +783,7 @@ internal sealed class OverlayForm : Form
         _tooltipTimer.Stop();
         if (_tooltipFor is null) return;
         _tooltipFor = null;
-        Invalidate();
+        InvalidateChrome();
     }
 
     private Grip HitTestGrip(Point p, double scale)
@@ -785,7 +903,7 @@ internal sealed class OverlayForm : Form
                     _sel = new Rectangle(_sel.X + dx, _sel.Y + dy, _sel.Width, _sel.Height);
                     NudgeIntoView();
                 }
-                Invalidate();
+                InvalidateChrome();
                 return true;
         }
 
@@ -840,6 +958,48 @@ internal sealed class OverlayForm : Form
         }
     }
 
+    // ---------------- test seams ----------------
+    // Painting only the dirty rect is right only if it lands the same pixels a full repaint
+    // would; SelfTest drives these to prove it, so a stale-pixel regression fails the build
+    // check rather than showing up as a smear on someone's screen.
+
+    /// <summary>Puts the overlay in the idle state at a cursor position; returns the dirty rect.</summary>
+    internal Rectangle IdleAtForTest(Point mouse)
+    {
+        _phase = Phase.Idle;
+        _sel = Rectangle.Empty;
+        _activeGrip = Grip.None;
+        _hoverButton = null;
+        _tooltipFor = null;
+        _mouse = mouse;
+        return DirtyRect();
+    }
+
+    /// <summary>Puts the overlay in the adjusting state with a selection; returns the dirty rect.</summary>
+    internal Rectangle SelectForTest(Rectangle selection, bool withTooltip)
+    {
+        _phase = Phase.Adjusting;
+        _sel = selection;
+        _activeGrip = Grip.None;
+        _mouse = new Point(selection.X + selection.Width / 2, selection.Y + selection.Height / 2);
+
+        EnsureToolbarLayout(SelectionScale());
+        _hoverButton = withTooltip && _buttons.Count > 0 ? _buttons[0].Id : null;
+        _tooltipFor = _hoverButton;
+
+        return DirtyRect();
+    }
+
+    internal void PaintForTest(Graphics g, Rectangle clip)
+    {
+        // Windows hands OnPaint a DC already clipped to the invalid region; a bare
+        // PaintEventArgs does not, and without this the chrome would be drawn over and over.
+        var state = g.Save();
+        g.SetClip(clip);
+        using (var e = new PaintEventArgs(g, clip)) OnPaint(e);
+        g.Restore(state);
+    }
+
     /// <summary>The crop, with no resampling at all - byte-identical to what is on screen.</summary>
     private Bitmap Produce() => DpiScaler.Crop(_capture.Image, _capture.VirtualBounds, ToVirtual(_sel));
 
@@ -851,8 +1011,9 @@ internal sealed class OverlayForm : Form
         if (disposing)
         {
             _tooltipTimer.Dispose();
-            _dimmed?.Dispose();
-            _dimmed = null;
+            _paintSource?.Dispose();
+            _paintSource = null;
+            _veilBrush.Dispose();
             foreach (var f in _fonts.Values) f.Dispose();
             _fonts.Clear();
         }

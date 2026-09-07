@@ -113,7 +113,9 @@ It verifies that the process really is per-monitor-V2 DPI aware, that the captur
 matches the physical virtual-desktop size, that a crop keeps every pixel, that the logical
 size divides the UI scale out correctly, that a clipboard bitmap round-trips at native size,
 and that the SVG payload declares the logical size around a native raster while carrying no
-bitmap format. Report goes to `%TEMP%\yako-selftest.txt`; exits non-zero on failure.
+bitmap format. It also drives the overlay through a run of state changes to prove that
+repainting only the rect a change dirtied lands exactly the pixels a full repaint would.
+Report goes to `%TEMP%\yako-selftest.txt`; exits non-zero on failure.
 
 To ship a single self-contained exe:
 
