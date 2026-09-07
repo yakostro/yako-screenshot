@@ -15,10 +15,10 @@ internal sealed class OverlayForm : Form
 
     private enum Grip { None, Move, TopLeft, Top, TopRight, Right, BottomRight, Bottom, BottomLeft, Left }
 
-    private enum ButtonId { CopySvg, Copy, Save }
+    private enum ButtonId { Pencil, CopySvg, Copy, Save }
 
     /// <summary>Named ButtonIcon, not Icon, so it does not shadow Form.Icon.</summary>
-    private enum ButtonIcon { Figma, Copy, Save }
+    private enum ButtonIcon { Pencil, Figma, Copy, Save }
 
     private const int WM_DPICHANGED = 0x02E0;
     private const int MinDragPixels = 4;
@@ -31,6 +31,8 @@ internal sealed class OverlayForm : Form
     private static readonly Color ButtonBack = Color.FromArgb(255, 50, 50, 58);
     private static readonly Color ButtonHover = Color.FromArgb(255, 72, 72, 84);
     private static readonly Color Veil = Color.FromArgb(120, 0, 0, 0);
+    private static readonly Color PencilColor = Color.FromArgb(255, 220, 38, 38);
+    private const int PencilWidthLogical = 4;
 
     private readonly CaptureResult _capture;
     private readonly Settings _settings;
@@ -53,6 +55,10 @@ internal sealed class OverlayForm : Form
     private Point _gripStartMouse;
     private Rectangle _barRect;
     private ButtonId? _hoverButton;
+
+    private bool _drawMode;
+    private readonly List<Point[]> _strokes = new();
+    private List<Point>? _activeStroke;
 
     // Hover highlighting is instant, but the tooltip waits: it is a reminder for when you
     // pause, not something that should flash past every time the cursor crosses the bar.
@@ -207,6 +213,9 @@ internal sealed class OverlayForm : Form
         }
 
         double scale = SelectionScale();
+
+        DrawStrokes(g, scale);
+
         using (var pen = new Pen(Accent, Px(1, scale)))
             g.DrawRectangle(pen, _sel.X, _sel.Y, Math.Max(1, _sel.Width - 1), Math.Max(1, _sel.Height - 1));
 
@@ -317,6 +326,34 @@ internal sealed class OverlayForm : Form
         }
     }
 
+    private static int StrokeWidthPx(double scale) => Px(PencilWidthLogical, scale);
+
+    private void DrawStrokes(Graphics g, double scale)
+    {
+        if (_strokes.Count == 0 && _activeStroke is null) return;
+
+        int width = StrokeWidthPx(scale);
+        var previous = g.SmoothingMode;
+        g.SmoothingMode = SmoothingMode.AntiAlias;
+        using var pen = new Pen(PencilColor, width)
+        { StartCap = LineCap.Round, EndCap = LineCap.Round, LineJoin = LineJoin.Round };
+        using var dot = new SolidBrush(PencilColor);
+
+        foreach (var stroke in _strokes) DrawStroke(g, stroke, pen, dot, width);
+        if (_activeStroke is not null) DrawStroke(g, _activeStroke.ToArray(), pen, dot, width);
+
+        g.SmoothingMode = previous;
+    }
+
+    private static void DrawStroke(Graphics g, Point[] points, Pen pen, Brush dot, int width)
+    {
+        if (points.Length == 0) return;
+        if (points.Length == 1)
+            g.FillEllipse(dot, points[0].X - width / 2f, points[0].Y - width / 2f, width, width);
+        else
+            g.DrawLines(pen, points);
+    }
+
     private (Grip Kind, Rectangle Rect)[] GripRects(double scale)
     {
         int s = Math.Max(6, Px(9, scale));
@@ -358,9 +395,15 @@ internal sealed class OverlayForm : Form
 
     private readonly record struct ButtonSpec(ButtonId Id, string Text, ButtonIcon Icon, string[] Tooltip);
 
-    // Figma first: it is the reason this tool exists, so it takes the leftmost slot.
+    // Pencil first: annotate before you export. Figma next - it is the reason this tool exists.
     private static readonly ButtonSpec[] Buttons =
     {
+        new(ButtonId.Pencil, "Draw", ButtonIcon.Pencil, new[]
+        {
+            "Draws in red over the selection",
+            "Click to toggle, then drag inside the selection",
+            "Ctrl+P",
+        }),
         new(ButtonId.CopySvg, "Copy for Figma", ButtonIcon.Figma, new[]
         {
             "Pastes into Figma at 100%",
@@ -441,7 +484,8 @@ internal sealed class OverlayForm : Form
         {
             var spec = Array.Find(Buttons, b => b.Id == id);
             bool hover = _hoverButton == id;
-            Color back = hover ? ButtonHover : ButtonBack;
+            bool active = id == ButtonId.Pencil && _drawMode;
+            Color back = active ? Accent : hover ? ButtonHover : ButtonBack;
 
             if (_tooltipFor == id) DrawTooltip(g, scale, rect, spec.Tooltip);
 
@@ -454,6 +498,10 @@ internal sealed class OverlayForm : Form
 
             switch (spec.Icon)
             {
+                case ButtonIcon.Pencil:
+                    Glyphs.DrawPencil(g, iconRect, ChromeText);
+                    break;
+
                 case ButtonIcon.Figma:
                     // The mark is taller than it is wide; keep its aspect inside the slot.
                     int markW = Math.Max(1, (int)Math.Round(iconRect.Height * FigmaGlyph.AspectRatio));
@@ -646,6 +694,8 @@ internal sealed class OverlayForm : Form
             _sel = Rectangle.Empty;
             _activeGrip = Grip.None;
             _hoverButton = null;
+            _strokes.Clear();
+            _activeStroke = null;
             Cursor = Cursors.Cross;
             InvalidateChrome();
             return;
@@ -668,12 +718,20 @@ internal sealed class OverlayForm : Form
             }
             if (_barRect.Contains(e.Location)) return; // dead space inside the bar
 
+            // A real resize handle always wins, even in draw mode - it is a small, deliberate
+            // target. Only the plain interior (Grip.Move) yields to drawing when that is on.
             var grip = HitTestGrip(e.Location, scale);
-            if (grip != Grip.None)
+            if (grip != Grip.None && !(grip == Grip.Move && _drawMode))
             {
                 _activeGrip = grip;
                 _gripStartSel = _sel;
                 _gripStartMouse = e.Location;
+                return;
+            }
+
+            if (_drawMode && _sel.Contains(e.Location))
+            {
+                BeginStroke(e.Location);
                 return;
             }
         }
@@ -683,8 +741,30 @@ internal sealed class OverlayForm : Form
         _sel = new Rectangle(e.Location, Size.Empty);
         _activeGrip = Grip.None;
         _hoverButton = null;
+        _strokes.Clear();
+        _activeStroke = null;
         Cursor = Cursors.Cross;
         InvalidateChrome();
+    }
+
+    private void BeginStroke(Point p)
+    {
+        _activeStroke = new List<Point> { p };
+        int w = StrokeWidthPx(SelectionScale());
+        Invalidate(Rectangle.Intersect(new Rectangle(p.X - w, p.Y - w, w * 2, w * 2), ClientRectangle));
+    }
+
+    private void ContinueStroke(Point p)
+    {
+        var prev = _activeStroke![^1];
+        _activeStroke.Add(p);
+
+        int w = StrokeWidthPx(SelectionScale());
+        var seg = Rectangle.FromLTRB(
+            Math.Min(prev.X, p.X), Math.Min(prev.Y, p.Y),
+            Math.Max(prev.X, p.X), Math.Max(prev.Y, p.Y));
+        seg.Inflate(w, w);
+        Invalidate(Rectangle.Intersect(seg, ClientRectangle));
     }
 
     protected override void OnMouseMove(MouseEventArgs e)
@@ -704,6 +784,10 @@ internal sealed class OverlayForm : Form
                 InvalidateChrome();
                 break;
 
+            case Phase.Adjusting when _activeStroke is not null:
+                ContinueStroke(e.Location);
+                break;
+
             case Phase.Adjusting when _activeGrip != Grip.None:
                 ApplyGrip(e.Location);
                 InvalidateChrome();
@@ -719,6 +803,13 @@ internal sealed class OverlayForm : Form
     {
         base.OnMouseUp(e);
         if (e.Button != MouseButtons.Left) return;
+
+        if (_activeStroke is not null)
+        {
+            _strokes.Add(_activeStroke.ToArray());
+            _activeStroke = null;
+            return;
+        }
 
         if (_activeGrip != Grip.None)
         {
@@ -773,9 +864,12 @@ internal sealed class OverlayForm : Form
             InvalidateChrome();   // the tooltip is drawn outside the bar
         }
 
+        var grip = HitTestGrip(p, scale);
         Cursor = hover is not null || _barRect.Contains(p)
             ? Cursors.Hand
-            : CursorFor(HitTestGrip(p, scale));
+            : grip == Grip.Move && _drawMode
+                ? Cursors.Cross
+                : CursorFor(grip);
     }
 
     private void HideTooltip()
@@ -887,6 +981,14 @@ internal sealed class OverlayForm : Form
                 Trigger(ButtonId.Save);
                 return true;
 
+            case Keys.P when ctrl && _phase == Phase.Adjusting:
+                Trigger(ButtonId.Pencil);
+                return true;
+
+            case Keys.Z when ctrl && _phase == Phase.Adjusting:
+                UndoStroke();
+                return true;
+
             case Keys.Left or Keys.Right or Keys.Up or Keys.Down when _phase == Phase.Adjusting:
                 int step = shift ? 10 : 1;
                 int dx = key == Keys.Left ? -step : key == Keys.Right ? step : 0;
@@ -932,7 +1034,27 @@ internal sealed class OverlayForm : Form
             case ButtonId.Save:
                 DoSave();
                 break;
+
+            case ButtonId.Pencil:
+                _drawMode = !_drawMode;
+                HideTooltip();
+                UpdateHover(_mouse);
+                InvalidateChrome();
+                break;
         }
+    }
+
+    private void UndoStroke()
+    {
+        if (_strokes.Count == 0) return;
+        var removed = _strokes[^1];
+        _strokes.RemoveAt(_strokes.Count - 1);
+
+        int w = StrokeWidthPx(SelectionScale());
+        var bounds = new Rectangle(removed[0], Size.Empty);
+        foreach (var p in removed) bounds = Rectangle.Union(bounds, new Rectangle(p, Size.Empty));
+        bounds.Inflate(w, w);
+        Invalidate(Rectangle.Intersect(bounds, ClientRectangle));
     }
 
     private void DoSave()
@@ -1000,8 +1122,31 @@ internal sealed class OverlayForm : Form
         g.Restore(state);
     }
 
-    /// <summary>The crop, with no resampling at all - byte-identical to what is on screen.</summary>
-    private Bitmap Produce() => DpiScaler.Crop(_capture.Image, _capture.VirtualBounds, ToVirtual(_sel));
+    /// <summary>
+    /// The crop, with no resampling at all - byte-identical to what is on screen - plus any
+    /// pencil strokes baked in on top, translated from window coordinates into the crop's own.
+    /// </summary>
+    private Bitmap Produce()
+    {
+        var bmp = DpiScaler.Crop(_capture.Image, _capture.VirtualBounds, ToVirtual(_sel));
+        if (_strokes.Count == 0) return bmp;
+
+        using var g = Graphics.FromImage(bmp);
+        g.SmoothingMode = SmoothingMode.AntiAlias;
+        int width = StrokeWidthPx(SelectionScale());
+        using var pen = new Pen(PencilColor, width)
+        { StartCap = LineCap.Round, EndCap = LineCap.Round, LineJoin = LineJoin.Round };
+        using var dot = new SolidBrush(PencilColor);
+
+        foreach (var stroke in _strokes)
+        {
+            var local = new Point[stroke.Length];
+            for (int i = 0; i < stroke.Length; i++)
+                local[i] = new Point(stroke[i].X - _sel.X, stroke[i].Y - _sel.Y);
+            DrawStroke(g, local, pen, dot, width);
+        }
+        return bmp;
+    }
 
     /// <summary>The size the capture represents once the Windows UI scale is divided out.</summary>
     private Size LogicalSize() => DpiScaler.LogicalSize(_sel.Size, SelectionScale());

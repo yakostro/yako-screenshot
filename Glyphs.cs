@@ -31,6 +31,34 @@ internal static class Glyphs
         End(g, state, unit);
     }
 
+    /// <summary>A pencil, tip pointing up-right: the annotate tool.</summary>
+    public static void DrawPencil(Graphics g, Rectangle bounds, Color stroke)
+    {
+        var state = Begin(g, bounds, out float unit);
+        g.TranslateTransform(12f, 12f);
+        g.RotateTransform(-45f);
+        g.TranslateTransform(-12f, -12f);
+
+        using var pen = new Pen(stroke, 1.6f) { LineJoin = LineJoin.Round, StartCap = LineCap.Round, EndCap = LineCap.Round };
+
+        // Body: flat tail, long shaft, a point on the right.
+        using (var body = new GraphicsPath())
+        {
+            body.AddLine(2f, 9f, 13f, 9f);
+            body.AddLine(13f, 9f, 18.5f, 12f);
+            body.AddLine(18.5f, 12f, 13f, 15f);
+            body.AddLine(13f, 15f, 2f, 15f);
+            body.CloseFigure();
+            g.DrawPath(pen, body);
+        }
+
+        // Eraser/ferrule seam, then the wood/graphite seam inside the point.
+        g.DrawLine(pen, 5f, 9f, 5f, 15f);
+        g.DrawLine(pen, 15f, 10.2f, 15f, 13.8f);
+
+        End(g, state, unit);
+    }
+
     /// <summary>An arrow dropping into a tray: save to a file.</summary>
     public static void DrawSave(Graphics g, Rectangle bounds, Color stroke)
     {
