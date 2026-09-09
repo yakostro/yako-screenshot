@@ -8,7 +8,7 @@
     <AssemblyName>Yako.Screenshot</AssemblyName>
     <!-- scripts/build-release.ps1 and publish-release.ps1 read this; publish-release.ps1
          auto-bumps the patch version if this one was already released. -->
-    <Version>0.1.4</Version>
+    <Version>0.1.5</Version>
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
     <LangVersion>latest</LangVersion>
