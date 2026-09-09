@@ -18,7 +18,17 @@ internal sealed class OverlayForm : Form
     private enum ButtonId { Pencil, CopySvg, Copy, Save }
 
     /// <summary>Named ButtonIcon, not Icon, so it does not shadow Form.Icon.</summary>
-    private enum ButtonIcon { Pencil, Figma, Copy, Save }
+    private enum ButtonIcon { None, Pencil, Copy, Save }
+
+    /// <summary>Per-letter colors for the word "Figma" in the Copy-for-Figma button, taken from the logotype.</summary>
+    private static readonly Color[] FigmaWordColors =
+    {
+        Color.FromArgb(0xF2, 0x4E, 0x1E), // F - orange
+        Color.FromArgb(0xFF, 0x72, 0x62), // i - pink
+        Color.FromArgb(0xA2, 0x59, 0xFF), // g - purple
+        Color.FromArgb(0x1A, 0xBC, 0xFE), // m - blue
+        Color.FromArgb(0x0A, 0xCF, 0x83), // a - green
+    };
 
     private const int WM_DPICHANGED = 0x02E0;
     private const int MinDragPixels = 4;
@@ -140,10 +150,23 @@ internal sealed class OverlayForm : Form
     private Font FontPx(double px, FontStyle style = FontStyle.Regular)
     {
         int size = Math.Max(9, (int)Math.Round(px));
-        int key = size * 16 + (int)style;
+        int key = size * 32 + (int)style;
         if (!_fonts.TryGetValue(key, out var f))
         {
             f = new Font("Segoe UI", size, style, GraphicsUnit.Pixel);
+            _fonts[key] = f;
+        }
+        return f;
+    }
+
+    /// <summary>Segoe UI Semibold is a distinct family, not a FontStyle - GDI+ has no semibold weight flag.</summary>
+    private Font SemiboldFontPx(double px)
+    {
+        int size = Math.Max(9, (int)Math.Round(px));
+        int key = size * 32 + 16;
+        if (!_fonts.TryGetValue(key, out var f))
+        {
+            f = new Font("Segoe UI Semibold", size, FontStyle.Regular, GraphicsUnit.Pixel);
             _fonts[key] = f;
         }
         return f;
@@ -404,7 +427,7 @@ internal sealed class OverlayForm : Form
             "Click to toggle, then drag inside the selection",
             "Ctrl+P",
         }),
-        new(ButtonId.CopySvg, "Copy for Figma", ButtonIcon.Figma, new[]
+        new(ButtonId.CopySvg, "Copy for Figma", ButtonIcon.None, new[]
         {
             "Pastes into Figma at 100%",
             "A PNG inside an SVG frame, so the Windows UI scale is ignored",
@@ -430,11 +453,33 @@ internal sealed class OverlayForm : Form
         return new Size(h, h);
     }
 
-    private static int ButtonWidth(ButtonSpec spec, Font font, double scale)
+    /// <summary>The word rendered bold and in per-letter logotype colors when it ends a button's label.</summary>
+    private const string FigmaWord = "Figma";
+
+    private static int MeasureWord(string word, Font font)
     {
-        int textW = TextRenderer
-            .MeasureText(spec.Text, font, new Size(int.MaxValue, int.MaxValue), TextFormatFlags.NoPadding).Width;
-        return Px(12, scale) * 2 + IconSize(scale).Width + Px(7, scale) + textW;
+        int w = 0;
+        foreach (char c in word)
+            w += TextRenderer.MeasureText(c.ToString(), font, new Size(int.MaxValue, int.MaxValue), TextFormatFlags.NoPadding).Width;
+        return w;
+    }
+
+    private static int MeasureButtonText(string text, Font font, Font semiboldFont)
+    {
+        if (text.EndsWith(FigmaWord, StringComparison.Ordinal))
+        {
+            string prefix = text[..^FigmaWord.Length];
+            int prefixW = TextRenderer.MeasureText(prefix, font, new Size(int.MaxValue, int.MaxValue), TextFormatFlags.NoPadding).Width;
+            return prefixW + MeasureWord(FigmaWord, semiboldFont);
+        }
+        return TextRenderer.MeasureText(text, font, new Size(int.MaxValue, int.MaxValue), TextFormatFlags.NoPadding).Width;
+    }
+
+    private static int ButtonWidth(ButtonSpec spec, Font font, Font semiboldFont, double scale)
+    {
+        int textW = MeasureButtonText(spec.Text, font, semiboldFont);
+        int iconW = spec.Icon == ButtonIcon.None ? 0 : IconSize(scale).Width + Px(7, scale);
+        return Px(12, scale) * 2 + iconW + textW;
     }
 
     private void EnsureToolbarLayout(double scale)
@@ -442,6 +487,7 @@ internal sealed class OverlayForm : Form
         _buttons.Clear();
 
         var font = FontPx(13 * scale);
+        var semiboldFont = SemiboldFontPx(13 * scale);
         int gap = Px(6, scale), barPad = Px(6, scale);
         int btnH = Px(32, scale);
 
@@ -449,7 +495,7 @@ internal sealed class OverlayForm : Form
         int total = 0;
         for (int i = 0; i < Buttons.Length; i++)
         {
-            widths[i] = ButtonWidth(Buttons[i], font, scale);
+            widths[i] = ButtonWidth(Buttons[i], font, semiboldFont, scale);
             total += widths[i];
         }
         total += gap * (Buttons.Length - 1);
@@ -477,6 +523,7 @@ internal sealed class OverlayForm : Form
         FillRounded(g, _barRect, Px(8, scale), ChromeBack);
 
         var font = FontPx(13 * scale);
+        var semiboldFont = SemiboldFontPx(13 * scale);
         var icon = IconSize(scale);
         int padH = Px(12, scale), iconGap = Px(7, scale);
 
@@ -491,38 +538,66 @@ internal sealed class OverlayForm : Form
 
             FillRounded(g, rect, Px(6, scale), back);
 
-            var iconRect = new Rectangle(
-                rect.X + padH,
-                rect.Y + (rect.Height - icon.Height) / 2,
-                icon.Width, icon.Height);
-
-            switch (spec.Icon)
+            int textX;
+            if (spec.Icon == ButtonIcon.None)
             {
-                case ButtonIcon.Pencil:
-                    Glyphs.DrawPencil(g, iconRect, ChromeText);
-                    break;
+                textX = rect.X + padH;
+            }
+            else
+            {
+                var iconRect = new Rectangle(
+                    rect.X + padH,
+                    rect.Y + (rect.Height - icon.Height) / 2,
+                    icon.Width, icon.Height);
 
-                case ButtonIcon.Figma:
-                    // The mark is taller than it is wide; keep its aspect inside the slot.
-                    int markW = Math.Max(1, (int)Math.Round(iconRect.Height * FigmaGlyph.AspectRatio));
-                    FigmaGlyph.Draw(g, new Rectangle(
-                        iconRect.X + (iconRect.Width - markW) / 2, iconRect.Y, markW, iconRect.Height));
-                    break;
+                switch (spec.Icon)
+                {
+                    case ButtonIcon.Pencil:
+                        Glyphs.DrawPencil(g, iconRect, ChromeText);
+                        break;
 
-                case ButtonIcon.Copy:
-                    Glyphs.DrawCopy(g, iconRect, ChromeText, back);
-                    break;
+                    case ButtonIcon.Copy:
+                        Glyphs.DrawCopy(g, iconRect, ChromeText, back);
+                        break;
 
-                case ButtonIcon.Save:
-                    Glyphs.DrawSave(g, iconRect, ChromeText);
-                    break;
+                    case ButtonIcon.Save:
+                        Glyphs.DrawSave(g, iconRect, ChromeText);
+                        break;
+                }
+
+                textX = iconRect.Right + iconGap;
             }
 
-            int textX = iconRect.Right + iconGap;
-            TextRenderer.DrawText(g, spec.Text, font,
-                new Rectangle(textX, rect.Y, Math.Max(0, rect.Right - padH - textX), rect.Height),
-                ChromeText,
+            var textRect = new Rectangle(textX, rect.Y, Math.Max(0, rect.Right - padH - textX), rect.Height);
+            if (spec.Text.EndsWith(FigmaWord, StringComparison.Ordinal))
+            {
+                string prefix = spec.Text[..^FigmaWord.Length];
+                TextRenderer.DrawText(g, prefix, font, textRect, ChromeText,
+                    TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPadding);
+                int prefixW = TextRenderer
+                    .MeasureText(prefix, font, new Size(int.MaxValue, int.MaxValue), TextFormatFlags.NoPadding).Width;
+                DrawWordInColors(g, FigmaWord, semiboldFont, FigmaWordColors,
+                    new Rectangle(textX + prefixW, rect.Y, textRect.Width - prefixW, rect.Height));
+            }
+            else
+            {
+                TextRenderer.DrawText(g, spec.Text, font, textRect, ChromeText,
+                    TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPadding);
+            }
+        }
+    }
+
+    /// <summary>Draws a word one letter at a time, cycling through <paramref name="colors"/>.</summary>
+    private static void DrawWordInColors(Graphics g, string word, Font font, Color[] colors, Rectangle rect)
+    {
+        int x = rect.X;
+        for (int i = 0; i < word.Length; i++)
+        {
+            string ch = word[i].ToString();
+            int w = TextRenderer.MeasureText(ch, font, new Size(int.MaxValue, int.MaxValue), TextFormatFlags.NoPadding).Width;
+            TextRenderer.DrawText(g, ch, font, new Rectangle(x, rect.Y, w, rect.Height), colors[i % colors.Length],
                 TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPadding);
+            x += w;
         }
     }
 
